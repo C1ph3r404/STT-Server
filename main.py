@@ -22,22 +22,37 @@ async def websocket_endpoint(websocket: WebSocket):
     audio_buffer = bytearray()
     last_transcribed_len = 0
     
+    is_transcribing = False
+    pending_task = None
+    
+    async def do_partial(buffer_copy):
+        nonlocal is_transcribing
+        try:
+            text = await run_transcription(buffer_copy)
+            await websocket.send_json({"event": "partial", "text": text})
+        except Exception as e:
+            print(f"Partial error: {e}")
+        finally:
+            is_transcribing = False
+
     try:
         while True:
             print("STT: Waiting for WS data...")
             data = await websocket.receive()
             print(f"STT: Received raw data: keys={data.keys()}")
+            
             if data.get("bytes"):
                 print(f"STT: Received {len(data['bytes'])} bytes")
                 audio_buffer.extend(data["bytes"])
                 
                 # Only run partial transcription if we've accumulated at least 0.5 seconds (16000 bytes) 
                 # of NEW audio since the last time we transcribed. This prevents CPU backlog.
-                if len(audio_buffer) - last_transcribed_len >= 16000:
+                if len(audio_buffer) - last_transcribed_len >= 16000 and not is_transcribing:
                     print(f"Running partial transcription on {len(audio_buffer)} bytes...")
-                    text = await run_transcription(audio_buffer)
-                    await websocket.send_json({"event": "partial", "text": text})
+                    is_transcribing = True
                     last_transcribed_len = len(audio_buffer)
+                    pending_task = asyncio.create_task(do_partial(bytearray(audio_buffer)))
+                    
             elif data.get("text"):
                 msg = data["text"]
                 print(f"STT: Received text message: {msg}")
@@ -46,11 +61,18 @@ async def websocket_endpoint(websocket: WebSocket):
                     msg_data = json.loads(msg)
                     if msg_data.get("text") == "stop":
                         print("Received stop signal. Running final transcription...")
+                        # Wait for any pending partial transcription to avoid race conditions
+                        if pending_task and not pending_task.done():
+                            await pending_task
+                            
                         # Final transcription
                         if len(audio_buffer) > 0:
                             text = await run_transcription(audio_buffer)
-                            await websocket.send_json({"event": "final", "text": text})
-                            print(f"Final STT Result: '{text}'")
+                            try:
+                                await websocket.send_json({"event": "final", "text": text})
+                                print(f"Final STT Result: '{text}'")
+                            except Exception as e:
+                                print(f"Failed to send final STT result: {e}")
                         break
                 except Exception as e:
                     print(f"STT: JSON Parse error or not stop: {e}")
@@ -58,6 +80,7 @@ async def websocket_endpoint(websocket: WebSocket):
             elif data.get("type") == "websocket.disconnect":
                 print("STT: Client disconnected normally.")
                 break
+
     except WebSocketDisconnect:
         print("WS Disconnected")
     except RuntimeError as e:
