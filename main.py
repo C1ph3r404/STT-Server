@@ -24,8 +24,11 @@ async def websocket_endpoint(websocket: WebSocket):
     
     try:
         while True:
+            print("STT: Waiting for WS data...")
             data = await websocket.receive()
+            print(f"STT: Received raw data: keys={data.keys()}")
             if data.get("bytes"):
+                print(f"STT: Received {len(data['bytes'])} bytes")
                 audio_buffer.extend(data["bytes"])
                 
                 # Only run partial transcription if we've accumulated at least 0.5 seconds (16000 bytes) 
@@ -37,6 +40,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     last_transcribed_len = len(audio_buffer)
             elif data.get("text"):
                 msg = data["text"]
+                print(f"STT: Received text message: {msg}")
                 import json
                 try:
                     msg_data = json.loads(msg)
@@ -48,8 +52,12 @@ async def websocket_endpoint(websocket: WebSocket):
                             await websocket.send_json({"event": "final", "text": text})
                             print(f"Final STT Result: '{text}'")
                         break
-                except Exception:
+                except Exception as e:
+                    print(f"STT: JSON Parse error or not stop: {e}")
                     pass
+            elif data.get("type") == "websocket.disconnect":
+                print("STT: Client disconnected normally.")
+                break
     except WebSocketDisconnect:
         print("WS Disconnected")
     except RuntimeError as e:
